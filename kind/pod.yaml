@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ndfuse-pod
+spec:
+  initContainers:
+  - name: ndfuse-proxy
+    image: ndfuse-proxy:latest
+    imagePullPolicy: Never
+    restartPolicy: Always # run as sidecar container
+    command: ["/app/ndfuse-proxy", "./go-fuse-loopback", "/dev/fd/ndfuse", "./"]
+    env:
+    - name: NDFUSE_SOCKET_PATH
+      value: "/tmp/ndfuse/ndfuse.sock"
+    volumeMounts:
+    - name: ndfuse-socket
+      mountPath: /tmp/ndfuse
+  containers:
+  - name: ndfuse-shim
+    image: ndfuse-shim:latest
+    imagePullPolicy: Never
+    command: ["/bin/bash"]
+    args: ["-c", "sleep infinity"]
+    env:
+    - name: NDFUSE_SOCKET_PATH
+      value: "/tmp/ndfuse/ndfuse.sock"
+    volumeMounts:
+    - name: ndfuse-socket
+      mountPath: /tmp/ndfuse
+    tty: true
+    stdin: true
+  volumes:
+  - name: ndfuse-socket
+    emptyDir: {}
+  restartPolicy: Never

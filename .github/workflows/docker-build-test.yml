@@ -1,0 +1,80 @@
+name: Docker Build Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  docker-build-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Cache builds
+      uses: actions/cache@v4
+      with:
+        path: /home/runner/build_cache
+        key: builds-cache
+    
+    - name: Create cache dir
+      run: mkdir -p /home/runner/build_cache
+
+    - name: Get runner user IDs
+      id: runner_ids
+      run: |
+        echo "uid=$(id -u)" >> $GITHUB_OUTPUT
+        echo "gid=$(id -g)" >> $GITHUB_OUTPUT
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.dev
+        push: false
+        load: true
+        tags: ndfuse-dev
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          UID=${{ steps.runner_ids.outputs.uid }}
+          GID=${{ steps.runner_ids.outputs.gid }}
+    
+    - name: Test all builds together
+      run: |
+        docker run --rm \
+          -v ${{ github.workspace }}:/work \
+          -v /home/runner/build_cache:/cache \
+          -v /home/runner/build_cache/cargo_registry:/home/vscode/.cargo/registry \
+          -v /home/runner/build_cache/cargo_git:/home/vscode/.cargo/git \
+        ndfuse-dev -c "
+          set -e
+          echo 'Testing complete build process...'
+
+          sudo chown -R vscode:vscode /cache
+          export CCACHE_DIR="/cache/ccache"
+          export SCCACHE_DIR="/cache/sccache"
+
+          # Build LKL first
+          ./build_lkl.sh
+          
+          # Build others
+          ./build.sh
+          
+          # Build cargo project
+          cargo build
+          
+          echo 'All builds completed successfully!'
+        "
+    - name: Test with kind
+      run: |
+        cd kind
+        ./run.sh

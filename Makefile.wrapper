@@ -1,0 +1,21 @@
+# Makefile for building lkl wrapper as standalone library
+CC=gcc
+CFLAGS=-I./linux/tools/lkl/include
+
+all: liblkl_wrapper.a
+
+lkl_wrapper.o: lkl_wrapper.c
+	$(CC) $(CFLAGS) -c lkl_wrapper.c -o lkl_wrapper.o
+
+liblkl.a:
+	./build_lkl.sh
+
+liblkl_wrapper.a: lkl_wrapper.o liblkl.a
+	cp liblkl.a liblkl_wrapper.a
+	ar rcs liblkl_wrapper.a lkl_wrapper.o
+
+clean:
+	rm -f lkl_wrapper.o liblkl_wrapper.a
+	rm -rf tmp_extract
+
+.PHONY: all clean

@@ -1,0 +1,38 @@
+FROM mcr.microsoft.com/vscode/devcontainers/base:ubuntu-24.04
+ARG UID=1000
+ARG GID=1000
+
+RUN userdel vscode
+RUN groupadd --gid $GID vscode && \
+    useradd --uid $UID --gid $GID -m --shell /bin/bash vscode && \
+    usermod -aG sudo vscode && \
+    sudo chown -R vscode:vscode /home/vscode
+
+USER vscode
+
+RUN sudo apt update && sudo apt upgrade -y
+RUN sudo apt install -y curl vim build-essential libssl-dev pkg-config cmake \
+    flex bison libelf-dev libfuse-dev libarchive-dev xfsprogs libjsmn-dev bc \
+    golang-go ccache mold clang binutils-dev
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+ENV PATH=/home/vscode/.cargo/bin:$PATH
+RUN rustup install 1.89-x86_64-unknown-linux-gnu
+RUN rustup default 1.89-x86_64-unknown-linux-gnu
+RUN rustup component add rust-analyzer
+
+RUN sudo ln -s /usr/bin/ccache /usr/local/bin/gcc
+RUN sudo ln -s /usr/bin/ccache /usr/local/bin/g++
+RUN sudo ln -s /usr/bin/ccache /usr/local/bin/cc
+RUN sudo ln -s /usr/bin/ccache /usr/local/bin/c++
+
+RUN cargo install sccache --locked
+COPY <<EOF /home/vscode/.cargo/config.toml
+[build]
+rustc-wrapper = "/home/vscode/.cargo/bin/sccache"
+
+EOF
+
+WORKDIR /work
+
+ENTRYPOINT ["/bin/bash"]

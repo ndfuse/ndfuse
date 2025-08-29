@@ -1,0 +1,15 @@
+{
+	"name": "ndfuse Dev Container",
+	"build": {
+		"context": "..",
+		"dockerfile": "../Dockerfile.dev"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"rust-lang.rust-analyzer",
+				"ms-vscode.cpptools-extension-pack"
+			]
+		}
+	}
+}

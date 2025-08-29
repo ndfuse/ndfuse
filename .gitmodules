@@ -1,0 +1,10 @@
+[submodule "zpoline"]
+	path = zpoline
+	url = https://github.com/yasukata/zpoline
+[submodule "linux"]
+	path = linux
+	url = https://github.com/lkl/linux
+[submodule "libc"]
+	path = libc
+	url = https://github.com/ndfuse/libc
+	branch = ndfuse

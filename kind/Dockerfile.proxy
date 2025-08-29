@@ -1,0 +1,6 @@
+FROM ubuntu:24.04
+
+RUN mkdir /app
+WORKDIR /app
+COPY ../target/debug/ndfuse-proxy .
+COPY ../go-fuse-loopback/go-fuse-loopback .

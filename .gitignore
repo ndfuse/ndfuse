@@ -1,0 +1,7 @@
+/target
+/*.log
+/go-fuse-loopback
+/target
+/*.a
+/*.o
+/.vscode
