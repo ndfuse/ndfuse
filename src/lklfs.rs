@@ -21,8 +21,6 @@ pub struct LKLFS {
 
 pub struct FileHandle {
     fh: u64,
-    _path: PathBuf,
-    _offset: u64,
 }
 
 fn init_logger(log_path: &str) {
@@ -355,14 +353,10 @@ impl LKLFS {
                 return None;
             }
         };
-        self.fds.lock().unwrap().insert(
-            fd as i32,
-            FileHandle {
-                fh: retval as u64,
-                _path: abs_path,
-                _offset: 0,
-            },
-        );
+        self.fds
+            .lock()
+            .unwrap()
+            .insert(fd as i32, FileHandle { fh: retval as u64 });
 
         Some(fd)
     }
