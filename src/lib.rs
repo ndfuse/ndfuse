@@ -1,19 +1,14 @@
+use crate::lklfs::LKLFS;
 use libc::{c_char, c_int, c_long, c_uint, c_void, mode_t, size_t};
+use log::debug;
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::sync::{LazyLock, Mutex};
 mod ipc;
 mod lklfs;
 
-static FS: LazyLock<Mutex<lklfs::LKLFS>> = LazyLock::new(|| {
-    Mutex::new(lklfs::LKLFS::new(
-        env::var("NDFUSE_SOCKET_PATH").unwrap_or_else(|_| "/tmp/ndfuse.sock".to_string()),
-        env::var("NDFUSE_LKLFS_LOG_PATH")
-            .unwrap_or_else(|_| "/tmp/ndfuse-shim-lklfs.log".to_string()),
-    ))
-});
-
-use std::env;
+static FS: LazyLock<Mutex<Option<LKLFS>>> = LazyLock::new(|| Mutex::new(None));
 
 type SyscallFn = extern "C" fn(c_long, c_long, c_long, c_long, c_long, c_long, c_long) -> c_long;
 
@@ -31,21 +26,40 @@ extern "C" fn hook_function(
 ) -> c_long {
     unsafe {
         if let Some(original_syscall) = NEXT_SYS_CALL {
-            // 保存しておいた元の関数を呼び出します。
+            let mut fs_lock = match FS.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    eprintln!("Failed to acquire FS lock: {}", e);
+                    return original_syscall(a1, a2, a3, a4, a5, a6, a7);
+                }
+            };
+            let fs = match fs_lock.as_mut() {
+                None => {
+                    eprintln!("Filesystem not initialized");
+                    return original_syscall(a1, a2, a3, a4, a5, a6, a7);
+                }
+                Some(f) => f,
+            };
+
             let res: Option<i64> = if a1 == syscall_numbers::x86_64::SYS_open {
-                unimplemented!("open called");
+                debug!("open called");
+                fs.open(a2 as *const c_char, a3 as c_int, a4 as mode_t)
             } else if a1 == syscall_numbers::x86_64::SYS_openat {
-                println!("openat called");
-                openat(a2 as c_int, a3 as *const c_char, a4 as c_int, a5 as mode_t)
+                debug!("openat called");
+                if a2 as c_int == libc::AT_FDCWD {
+                    fs.open(a3 as *const c_char, a4 as c_int, a5 as mode_t)
+                } else {
+                    None
+                }
             } else if a1 == syscall_numbers::x86_64::SYS_read {
-                println!("read called");
-                read(a2 as c_int, a3 as *mut c_void, a4 as size_t)
+                debug!("read called");
+                fs.read(a2 as c_int, a3 as *mut c_void, a4 as size_t)
             } else if a1 == syscall_numbers::x86_64::SYS_fstat {
-                println!("fstat called");
-                fstat(a2 as c_int, a3 as *mut libc::stat)
+                debug!("fstat called");
+                fs.fstat(a2 as c_int, a3 as *mut libc::stat)
             } else if a1 == syscall_numbers::x86_64::SYS_statx {
-                println!("statx called");
-                statx(
+                debug!("statx called");
+                fs.statx(
                     a2 as c_int,
                     a3 as *const c_char,
                     a4 as c_int,
@@ -53,22 +67,22 @@ extern "C" fn hook_function(
                     a6 as *mut libc::statx,
                 )
             } else if a1 == syscall_numbers::x86_64::SYS_getdents64 {
-                println!("getdents64 called");
-                getdents64(a2 as c_int, a3 as *mut libc::dirent64, a4 as usize)
+                debug!("getdents64 called");
+                fs.getdents64(a2 as c_int, a3 as *mut libc::dirent64, a4 as usize)
             } else if a1 == syscall_numbers::x86_64::SYS_lgetxattr {
-                println!("lgetxattr called");
-                lgetxattr(
+                debug!("lgetxattr called");
+                fs.lgetxattr(
                     a2 as *const c_char,
                     a3 as *const c_char,
                     a4 as *mut std::ffi::c_void,
                     a5 as size_t,
                 )
             } else if a1 == syscall_numbers::x86_64::SYS_listxattr {
-                println!("listxattr called");
-                listxattr(a2 as *const c_char, a3 as *mut c_char, a4 as usize)
+                debug!("listxattr called");
+                fs.listxattr(a2 as *const c_char, a3 as *mut c_char, a4 as usize)
             } else if a1 == syscall_numbers::x86_64::SYS_close {
-                println!("close called");
-                close(a2 as c_int)
+                debug!("close called");
+                fs.close(a2 as c_int)
             } else {
                 Some(original_syscall(a1, a2, a3, a4, a5, a6, a7))
             };
@@ -102,7 +116,9 @@ pub unsafe extern "C" fn __hook_init(
         }
         Err(e) => {
             eprintln!("Filesystem initialization failed: {}", e);
-            return -1;
+
+            // Not to return '-1' to avoid hang-up
+            return 0;
         }
     };
 }
@@ -121,110 +137,14 @@ fn init() -> Result<(), anyhow::Error> {
 
     writeln!(log, "[INIT] ndfuse-shim library loaded").ok();
 
-    match FS.lock().unwrap().init() {
-        Ok(_) => {}
-        Err(e) => {
-            writeln!(log, "[INIT] Filesystem initialization failed: {}", e).ok();
-            return Err(e);
-        }
-    };
+    let fs = LKLFS::new(
+        env::var("NDFUSE_SOCKET_PATH").unwrap_or_else(|_| "/tmp/ndfuse.sock".to_string()),
+        env::var("NDFUSE_LKLFS_LOG_PATH")
+            .unwrap_or_else(|_| "/tmp/ndfuse-shim-lklfs.log".to_string()),
+    )?;
+    FS.lock().unwrap().replace(fs);
 
     writeln!(log, "[INIT] Filesystem hooks initialized successfully").ok();
 
     Ok(())
-}
-
-pub fn statx(
-    dirfd: c_int,
-    pathname: *const c_char,
-    flags: c_int,
-    mask: c_uint,
-    statxbuf: *mut libc::statx,
-) -> Option<i64> {
-    if let Some(d) = FS
-        .lock()
-        .unwrap()
-        .statx(dirfd, pathname, flags, mask, statxbuf)
-    {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-pub fn fstat(fd: c_int, stat: *mut libc::stat) -> Option<i64> {
-    if let Some(d) = FS.lock().unwrap().fstat(fd, stat) {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-fn lgetxattr(
-    path: *const c_char,
-    name: *const c_char,
-    value: *mut std::ffi::c_void,
-    size: libc::size_t,
-) -> Option<i64> {
-    if let Some(d) = FS.lock().unwrap().lgetxattr(path, name, value, size) {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-fn listxattr(path: *const c_char, list: *mut c_char, size: usize) -> Option<i64> {
-    if let Some(d) = FS.lock().unwrap().listxattr(path, list, size) {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-fn open(path: *const c_char, flags: c_int, mode: mode_t) -> Option<i64> {
-    // Variable arguments handling for mode
-    let mode: Option<mode_t> = if flags & libc::O_CREAT != 0 {
-        Some(mode)
-    } else {
-        None
-    };
-
-    if let Some(d) = FS.lock().unwrap().open(path, flags, mode) {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-// Also hook openat for completeness
-fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: mode_t) -> Option<i64> {
-    if dirfd == libc::AT_FDCWD {
-        // If dirfd is AT_FDCWD, we can use the original open function
-        return open(path, flags, mode);
-    }
-    return None;
-}
-
-fn close(fd: c_int) -> Option<i64> {
-    if let Some(d) = FS.lock().unwrap().close(fd) {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-fn read(fd: c_int, buf: *mut c_void, count: size_t) -> Option<i64> {
-    if let Some(d) = FS.lock().unwrap().read(fd, buf, count) {
-        return Some(d);
-    } else {
-        return None;
-    }
-}
-
-fn getdents64(fd: c_int, dirent: *mut libc::dirent64, count: usize) -> Option<i64> {
-    if let Some(d) = FS.lock().unwrap().getdents64(fd, dirent, count) {
-        return Some(d);
-    } else {
-        return None;
-    }
 }
