@@ -96,7 +96,7 @@ impl BinSerdes for FstatRequest {}
 // refer to lkl/linux/tools/lkl/include/lkl/asm-generic/stat.h
 #[repr(C)]
 #[derive(Serialize, Deserialize, Debug)]
-pub struct stat {
+pub struct Stat {
     pub st_dev: u64,
     pub st_ino: u64,
     pub st_mode: u32,
@@ -104,9 +104,11 @@ pub struct stat {
     pub st_uid: u32,
     pub st_gid: u32,
     pub st_rdev: u64,
+    #[serde(skip)]
     __pad1: u64,
     pub st_size: i64,
     pub st_blksize: i32,
+    #[serde(skip)]
     __pad2: u32,
     pub st_blocks: i64,
     pub st_atime: i64,
@@ -118,7 +120,7 @@ pub struct stat {
     #[serde(skip)]
     __unused: [c_uint; 2],
 }
-impl BinSerdes for stat {}
+impl BinSerdes for Stat {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenRequest {
