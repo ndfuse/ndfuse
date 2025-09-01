@@ -331,7 +331,7 @@ impl LKLFS {
                 match ipc::get_response_unit!(&buf[0..read_size], ResponseKind::Open) {
                     Ok(response) => response,
                     Err(e) => {
-                        error!("failed to parse fstat response data: {}", e);
+                        error!("failed to parse open response data: {}", e);
                         return None;
                     }
                 }
@@ -536,12 +536,12 @@ impl LKLFS {
             {
                 Ok(response) => response,
                 Err(e) => {
-                    error!("failed to parse read response data: {}", e);
+                    error!("failed to parse getdents64 response data: {}", e);
                     return None;
                 }
             },
             Err(e) => {
-                error!("failed to read read response: {}", e);
+                error!("failed to read getdents64 response: {}", e);
                 return None;
             }
         };
