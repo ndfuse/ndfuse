@@ -1,7 +1,8 @@
 use crate::ipc::FstatRequest;
 use crate::ipc::Getdents64Request;
-use crate::ipc::{BinSerdes, InitResponse, Response, ShimOpcode, StatusCode};
-use crate::ipc::{CloseRequest, OpenRequest, ReadRequest, Request, StatxRequest};
+use crate::ipc::{BinSerdes, InitResponse, Response, StatusCode};
+use crate::ipc::{CloseRequest, OpenRequest, ReadRequest, StatxRequest};
+use crate::ipc::{Request, RequestKind};
 use libc::{c_char, c_int, c_long, c_uint};
 use log::{debug, error, info};
 use std::collections::HashMap;
@@ -82,7 +83,7 @@ impl LKLFS {
             Ok(conn) => {
                 info!("connected");
                 let init_req = Request {
-                    opcode: ShimOpcode::Init,
+                    kind: RequestKind::Init {},
                 };
 
                 match conn.send(&init_req.to_bytes().unwrap()) {
@@ -174,21 +175,16 @@ impl LKLFS {
             return None;
         }
 
-        let mut req_bytes = Request {
-            opcode: ShimOpcode::Statx,
-        }
-        .to_bytes()
-        .unwrap();
-        req_bytes.extend(
-            StatxRequest {
+        let req_bytes = Request {
+            kind: RequestKind::Statx(StatxRequest {
                 dirfd: dirfd,
                 flags: flags,
                 mask: mask,
                 abs_path: abs_path.to_str().unwrap().to_string(),
-            }
-            .to_bytes()
-            .unwrap(),
-        );
+            }),
+        }
+        .to_bytes()
+        .unwrap();
 
         match self.conn.as_ref().unwrap().send(&req_bytes) {
             Ok(n) => {
@@ -239,12 +235,11 @@ impl LKLFS {
         };
         info!("fstat: fd = {}, fh = {}", fd, fh.fh);
 
-        let mut req_bytes = Request {
-            opcode: ShimOpcode::Fstat,
+        let req_bytes = Request {
+            kind: RequestKind::Fstat(FstatRequest { fd: fh.fh as i32 }),
         }
         .to_bytes()
         .unwrap();
-        req_bytes.extend(FstatRequest { fd: fh.fh as i32 }.to_bytes().unwrap());
 
         match self.conn.as_ref().unwrap().send(&req_bytes) {
             Ok(n) => {
@@ -356,21 +351,15 @@ impl LKLFS {
             return None;
         }
 
-        // [TODO] support open
-        let mut req_bytes = Request {
-            opcode: ShimOpcode::Open,
-        }
-        .to_bytes()
-        .unwrap();
-        req_bytes.extend(
-            OpenRequest {
+        let req_bytes = Request {
+            kind: RequestKind::Open(OpenRequest {
                 flags: flags as u32,
                 mode: mode.unwrap_or(0),
                 abs_path: abs_path.to_string_lossy().to_string(),
-            }
-            .to_bytes()
-            .unwrap(),
-        );
+            }),
+        }
+        .to_bytes()
+        .unwrap();
 
         info!("req_bytes.len() = {}", req_bytes.len());
 
@@ -444,12 +433,11 @@ impl LKLFS {
         };
         info!("close: fd = {}, fh = {}", fd, fh.fh);
 
-        let mut req_bytes = Request {
-            opcode: ShimOpcode::Close,
+        let req_bytes = Request {
+            kind: RequestKind::Close(CloseRequest { fh: fh.fh }),
         }
         .to_bytes()
         .unwrap();
-        req_bytes.extend(CloseRequest { fh: fh.fh }.to_bytes().unwrap());
 
         if let Err(e) = self.conn.as_ref().unwrap().send(&req_bytes) {
             error!("failed to write close request: {}", e);
@@ -511,20 +499,15 @@ impl LKLFS {
             return None;
         };
         info!("read: fd = {}, fh = {}", fd, fh.fh);
-        let mut req_bytes = Request {
-            opcode: ShimOpcode::Read,
-        }
-        .to_bytes()
-        .unwrap();
-        req_bytes.extend(
-            ReadRequest {
+        let req_bytes = Request {
+            kind: RequestKind::Read(ReadRequest {
                 fh: fh.fh,
                 offset: fh.offset,
                 size: size as u32,
-            }
-            .to_bytes()
-            .unwrap(),
-        );
+            }),
+        }
+        .to_bytes()
+        .unwrap();
 
         info!("req_bytes.len() = {}", req_bytes.len());
 
@@ -588,19 +571,14 @@ impl LKLFS {
             return None;
         };
         info!("read: fd = {}, fh = {}", fd, fh.fh);
-        let mut req_bytes = Request {
-            opcode: ShimOpcode::Getdents64,
+        let req_bytes = Request {
+            kind: RequestKind::Getdents64(Getdents64Request {
+                fd: fh.fh as i32,
+                count: count as u32,
+            }),
         }
         .to_bytes()
         .unwrap();
-        req_bytes.extend(
-            Getdents64Request {
-                fd: fh.fh as i32,
-                count: count as u32,
-            }
-            .to_bytes()
-            .unwrap(),
-        );
 
         info!("req_bytes.len() = {}", req_bytes.len());
 

@@ -17,6 +17,23 @@ pub trait BinSerdes: for<'a> Deserialize<'a> + Serialize + Sized {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Request {
+    pub kind: RequestKind,
+}
+impl BinSerdes for Request {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RequestKind {
+    Init,
+    Statx(StatxRequest),
+    Fstat(FstatRequest),
+    Getdents64(Getdents64Request),
+    Open(OpenRequest),
+    Read(ReadRequest),
+    Close(CloseRequest),
+}
+
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum ShimOpcode {
@@ -35,12 +52,6 @@ pub enum StatusCode {
     OK = 1,
     ERROR = 2,
 }
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Request {
-    pub opcode: ShimOpcode,
-}
-impl BinSerdes for Request {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Response {

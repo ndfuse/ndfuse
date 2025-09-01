@@ -12,6 +12,7 @@ use uds::{UnixSeqpacketConn, UnixSeqpacketListener};
 
 use crate::ipc::BinSerdes;
 use crate::ipc::ShimOpcode;
+use crate::ipc::{Request, RequestKind};
 
 mod ipc;
 
@@ -206,11 +207,11 @@ fn serialize_response<T: BinSerdes>(
 
 fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut reader = std::io::Cursor::new(buffer);
-    let req = ipc::Request::from_reader(&mut reader)?;
+    let req = Request::from_reader(&mut reader)?;
     debug!("received: {:?}", &req);
 
-    match req.opcode {
-        ShimOpcode::Init => {
+    match req.kind {
+        RequestKind::Init => {
             return serialize_response(
                 &ipc::Response {
                     opcode: ShimOpcode::Init,
@@ -222,8 +223,7 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 }),
             );
         }
-        ShimOpcode::Statx => {
-            let req = ipc::StatxRequest::from_reader(&mut reader)?;
+        RequestKind::Statx(req) => {
             let path = CString::new(req.abs_path).unwrap();
             let mut statx = unsafe { std::mem::zeroed::<libc::statx>() };
             let ret = unsafe {
@@ -248,8 +248,7 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 Some(&statx),
             );
         }
-        ShimOpcode::Fstat => {
-            let req = ipc::FstatRequest::from_reader(&mut reader)?;
+        RequestKind::Fstat(req) => {
             let mut stat = unsafe { std::mem::zeroed::<ipc::stat>() };
             let ret = unsafe { lkl_wrapper_sys_fstat(req.fd, &mut stat as *mut ipc::stat) };
             if ret < 0 {
@@ -265,8 +264,7 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 Some(&stat),
             );
         }
-        ShimOpcode::Getdents64 => {
-            let req = ipc::Getdents64Request::from_reader(&mut reader)?;
+        RequestKind::Getdents64(req) => {
             let mut dirents = vec![0u8; req.count as usize];
             let ret = unsafe {
                 lkl_wrapper_sys_getdents64(
@@ -293,8 +291,7 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
             res.extend(&dirents[0..ret as usize]);
             return Ok(res);
         }
-        ShimOpcode::Open => {
-            let req = ipc::OpenRequest::from_reader(&mut reader)?;
+        RequestKind::Open(req) => {
             let path = CString::new(req.abs_path).unwrap();
             let ret =
                 unsafe { lkl_wrapper_sys_open(path.as_ptr(), req.flags as i32, req.mode as i32) };
@@ -312,8 +309,7 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 None,
             );
         }
-        ShimOpcode::Read => {
-            let req = ipc::ReadRequest::from_reader(&mut reader)?;
+        RequestKind::Read(req) => {
             let mut buf = vec![0u8; req.size as usize];
             let ret =
                 unsafe { lkl_wrapper_sys_read(req.fh as i32, buf.as_mut_ptr(), req.size as usize) };
@@ -333,8 +329,7 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
             res.extend(&buf[..ret as usize]);
             return Ok(res);
         }
-        ShimOpcode::Close => {
-            let req = ipc::CloseRequest::from_reader(&mut reader)?;
+        RequestKind::Close(req) => {
             let ret = unsafe { lkl_wrapper_sys_close(req.fh as i32) };
             if ret < 0 {
                 error!("lkl_sys_close failed: {}", lkl_strerror_safe((-ret) as i32));
