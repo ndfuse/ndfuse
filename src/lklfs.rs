@@ -13,9 +13,7 @@ use std::sync::Mutex;
 
 pub struct LKLFS {
     mountpoint: path::PathBuf,
-    socket_path: String,
-    log_path: String,
-    conn: Option<uds::UnixSeqpacketConn>,
+    conn: uds::UnixSeqpacketConn,
 
     // (fd for local kernel, fh for fuse)
     fds: Mutex<HashMap<c_int, FileHandle>>,
@@ -27,40 +25,24 @@ pub struct FileHandle {
     _offset: u64,
 }
 
-impl LKLFS {
-    pub fn new(sock_path: String, log_path: String) -> Self {
-        LKLFS {
-            mountpoint: "/".into(),
-            socket_path: sock_path,
-            log_path: log_path,
-            conn: None,
-            fds: Mutex::new(HashMap::new()),
-        }
-    }
+fn init_logger(log_path: &str) {
+    fern::Dispatch::new()
+        .level(log::LevelFilter::Debug)
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}] {}",
+                // [TODO] fix this
+                //chrono::Local::now().format("[%Y-%m-%d %H:%M:%S]"), // this hangs
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .chain(fern::log_file(log_path.to_string()).unwrap())
+        .apply()
+        .unwrap();
 
-    fn init_logger(&self) {
-        fern::Dispatch::new()
-            .level(log::LevelFilter::Debug)
-            .format(|out, message, record| {
-                out.finish(format_args!(
-                    "[{}][{}] {}",
-                    // [TODO] fix this
-                    //chrono::Local::now().format("[%Y-%m-%d %H:%M:%S]"), // this hangs
-                    record.target(),
-                    record.level(),
-                    message
-                ))
-            })
-            .chain(fern::log_file(self.log_path.clone()).unwrap())
-            .apply()
-            .unwrap();
-
-        info!("\n--- ndfuse-shim logger initialized ---");
-    }
-
-    fn contains_path(&self, path: &path::Path) -> bool {
-        path.starts_with(&self.mountpoint)
-    }
+    info!("\n--- ndfuse-shim logger initialized ---");
 }
 
 fn get_abs_path(path: *const c_char) -> PathBuf {
@@ -74,13 +56,13 @@ fn get_abs_path(path: *const c_char) -> PathBuf {
 }
 
 impl LKLFS {
-    pub fn init(&mut self) -> Result<(), anyhow::Error> {
-        self.init_logger();
-        info!("socket_path = {}", self.socket_path);
-        info!("log_path = {}", self.log_path);
+    pub fn new(sock_path: String, log_path: String) -> Result<Self, anyhow::Error> {
+        init_logger(&log_path);
+        info!("socket_path = {}", &sock_path);
+        info!("log_path = {}", &log_path);
 
-        info!("connecting to ndfuse-proxy socket({})", self.socket_path);
-        match uds::UnixSeqpacketConn::connect(&self.socket_path) {
+        info!("connecting to ndfuse-proxy socket({})", &sock_path);
+        let (conn, mountpoint) = match uds::UnixSeqpacketConn::connect(&sock_path) {
             Ok(conn) => {
                 info!("connected");
                 let init_req = Request {
@@ -98,27 +80,37 @@ impl LKLFS {
                 }
 
                 let mut buf = [0u8; 1024];
-                match conn.recv(&mut buf) {
+                let mountpoint = match conn.recv(&mut buf) {
                     Ok(read_size) => {
                         let (_, init_res) =
                             ipc::get_response!(&buf[0..read_size], ResponseKind::Init)?;
-                        self.mountpoint =
-                            path::PathBuf::from(init_res.mountpoint).canonicalize()?;
+                        path::PathBuf::from(init_res.mountpoint).canonicalize()?
                     }
                     Err(e) => {
                         error!("failed to read init response: {}", e);
                         return Err(anyhow::anyhow!("failed to read init response: {}", e));
                     }
-                }
-                self.conn = Some(conn);
-                Ok(())
+                };
+                (conn, mountpoint)
             }
-            Err(e) => Err(anyhow::anyhow!(
-                "failed to connect to socket {}: {}",
-                self.socket_path,
-                e
-            )),
-        }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to connect to socket {}: {}",
+                    &sock_path,
+                    e
+                ));
+            }
+        };
+
+        Ok(LKLFS {
+            mountpoint: mountpoint,
+            conn: conn,
+            fds: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn contains_path(&self, path: &path::Path) -> bool {
+        path.starts_with(&self.mountpoint)
     }
 
     pub fn statx(
@@ -160,7 +152,7 @@ impl LKLFS {
         .to_bytes()
         .unwrap();
 
-        match self.conn.as_ref().unwrap().send(&req_bytes) {
+        match self.conn.send(&req_bytes) {
             Ok(n) => {
                 debug!("write size {}", n);
             }
@@ -170,7 +162,7 @@ impl LKLFS {
         }
 
         let mut buf = [0; 1024];
-        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let (retval, res) = match self.conn.recv(&mut buf) {
             Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Statx) {
                 Ok(r) => r,
                 Err(e) => {
@@ -207,7 +199,7 @@ impl LKLFS {
         .to_bytes()
         .unwrap();
 
-        match self.conn.as_ref().unwrap().send(&req_bytes) {
+        match self.conn.send(&req_bytes) {
             Ok(n) => {
                 debug!("write size {}", n);
             }
@@ -217,7 +209,7 @@ impl LKLFS {
         }
 
         let mut buf = [0; 1024];
-        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let (retval, res) = match self.conn.recv(&mut buf) {
             Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Fstat) {
                 Ok(response) => response,
                 Err(e) => {
@@ -291,18 +283,19 @@ impl LKLFS {
         Some(0)
     }
 
-    pub fn open(
-        &mut self,
-        path: *const c_char,
-        flags: c_int,
-        mode: Option<libc::mode_t>,
-    ) -> Option<i64> {
+    pub fn open(&mut self, path: *const c_char, flags: c_int, mode: libc::mode_t) -> Option<i64> {
         let abs_path = get_abs_path(path);
 
         // check if the path is within the mountpoint
         if !self.contains_path(&abs_path) {
             return None;
         }
+
+        let mode: Option<libc::mode_t> = if flags & libc::O_CREAT != 0 {
+            Some(mode)
+        } else {
+            None
+        };
 
         let req_bytes = Request {
             kind: RequestKind::Open(OpenRequest {
@@ -316,7 +309,7 @@ impl LKLFS {
 
         info!("req_bytes.len() = {}", req_bytes.len());
 
-        match self.conn.as_ref().unwrap().send(&req_bytes) {
+        match self.conn.send(&req_bytes) {
             Ok(n) => {
                 debug!("write size {}", n);
             }
@@ -326,7 +319,7 @@ impl LKLFS {
         }
 
         let mut buf = [0; 1024];
-        let retval = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let retval = match self.conn.recv(&mut buf) {
             Ok(read_size) => {
                 match ipc::get_response_unit!(&buf[0..read_size], ResponseKind::Open) {
                     Ok(response) => response,
@@ -389,13 +382,13 @@ impl LKLFS {
         .to_bytes()
         .unwrap();
 
-        if let Err(e) = self.conn.as_ref().unwrap().send(&req_bytes) {
+        if let Err(e) = self.conn.send(&req_bytes) {
             error!("failed to write close request: {}", e);
             return None;
         }
 
         let mut buf = [0u8; 1024];
-        let retval = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let retval = match self.conn.recv(&mut buf) {
             Ok(read_size) => {
                 match ipc::get_response_unit!(&buf[0..read_size], ResponseKind::Close) {
                     Ok(response) => response,
@@ -457,7 +450,7 @@ impl LKLFS {
 
         info!("req_bytes.len() = {}", req_bytes.len());
 
-        match self.conn.as_ref().unwrap().send(&req_bytes) {
+        match self.conn.send(&req_bytes) {
             Ok(n) => {
                 debug!("write size {}", n);
             }
@@ -467,7 +460,7 @@ impl LKLFS {
         }
 
         let mut buf = vec![0; size + 200];
-        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let (retval, res) = match self.conn.recv(&mut buf) {
             Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Read) {
                 Ok(response) => response,
                 Err(e) => {
@@ -521,7 +514,7 @@ impl LKLFS {
 
         info!("req_bytes.len() = {}", req_bytes.len());
 
-        match self.conn.as_ref().unwrap().send(&req_bytes) {
+        match self.conn.send(&req_bytes) {
             Ok(n) => {
                 debug!("write size {}", n);
             }
@@ -531,7 +524,7 @@ impl LKLFS {
         }
 
         let mut buf = vec![0; count + 200];
-        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let (retval, res) = match self.conn.recv(&mut buf) {
             Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Getdents64)
             {
                 Ok(response) => response,
