@@ -1,8 +1,9 @@
+use crate::ipc;
 use crate::ipc::FstatRequest;
 use crate::ipc::Getdents64Request;
-use crate::ipc::{BinSerdes, InitResponse, Response, StatusCode};
+use crate::ipc::{BinSerdes, StatusCode};
 use crate::ipc::{CloseRequest, OpenRequest, ReadRequest, StatxRequest};
-use crate::ipc::{Request, RequestKind};
+use crate::ipc::{Request, RequestKind, Response, ResponseKind};
 use libc::{c_char, c_int, c_long, c_uint};
 use log::{debug, error, info};
 use std::collections::HashMap;
@@ -23,7 +24,7 @@ pub struct LKLFS {
 pub struct FileHandle {
     fh: u64,
     _path: PathBuf,
-    offset: u64,
+    _offset: u64,
 }
 
 impl LKLFS {
@@ -99,35 +100,8 @@ impl LKLFS {
                 let mut buf = [0u8; 1024];
                 match conn.recv(&mut buf) {
                     Ok(read_size) => {
-                        let mut reader = std::io::Cursor::new(&buf[0..read_size]);
-                        let res = match Response::from_reader(&mut reader) {
-                            Ok(response) => response,
-                            Err(e) => {
-                                error!("failed to parse init response: {}", e);
-                                return Err(anyhow::anyhow!(
-                                    "failed to parse init response: {}",
-                                    e
-                                ));
-                            }
-                        };
-                        info!("init response: {:?}", res);
-                        if res.status != StatusCode::OK {
-                            return Err(anyhow::anyhow!(
-                                "ndfuse-proxy returned error: {:?}",
-                                res.status
-                            ));
-                        }
-                        let init_res = match InitResponse::from_reader(&mut reader) {
-                            Ok(response) => response,
-                            Err(e) => {
-                                error!("failed to parse init response data: {}", e);
-                                return Err(anyhow::anyhow!(
-                                    "failed to parse init response data: {}",
-                                    e
-                                ));
-                            }
-                        };
-                        info!("init response data: {:?}", init_res);
+                        let (_, init_res) =
+                            ipc::get_response!(&buf[0..read_size], ResponseKind::Init)?;
                         self.mountpoint =
                             path::PathBuf::from(init_res.mountpoint).canonicalize()?;
                     }
@@ -196,34 +170,26 @@ impl LKLFS {
         }
 
         let mut buf = [0; 1024];
-        let res = match self.conn.as_mut().unwrap().recv(&mut buf) {
-            Ok(read_size) => {
-                let mut reader = std::io::Cursor::new(&buf[0..read_size]);
-                let res = match Response::from_reader(&mut reader) {
-                    Ok(response) => response,
-                    Err(e) => {
-                        error!("failed to parse statx response: {}", e);
-                        return None;
-                    }
-                };
-                info!("statx response: {:?}", res);
-                if res.status != StatusCode::OK {
-                    error!("ndfuse-proxy returned error: {:?}", res.status);
+        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+            Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Statx) {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("failed to read statx response data: {}", e);
                     return None;
                 }
-                let res: libc::statx = rmp_serde::from_read(&mut reader).unwrap();
-                res
-            }
+            },
             Err(e) => {
                 error!("failed to read statx response: {}", e);
                 return None;
             }
         };
 
-        unsafe {
-            *statxbuf = res;
+        if retval == 0 {
+            unsafe {
+                *statxbuf = res;
+            }
         }
-        Some(0)
+        Some(retval)
     }
 
     pub fn fstat(&mut self, fd: c_int, stat: *mut libc::stat) -> Option<i64> {
@@ -251,54 +217,41 @@ impl LKLFS {
         }
 
         let mut buf = [0; 1024];
-        let res = match self.conn.as_mut().unwrap().recv(&mut buf) {
-            Ok(read_size) => {
-                let mut reader = std::io::Cursor::new(&buf[0..read_size]);
-                let res = match Response::from_reader(&mut reader) {
-                    Ok(response) => response,
-                    Err(e) => {
-                        error!("failed to parse fstat response: {}", e);
-                        return None;
-                    }
-                };
-                info!("fstat response: {:?}", res);
-                if res.status != StatusCode::OK {
-                    error!("ndfuse-proxy returned error: {:?}", res.status);
+        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+            Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Fstat) {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("failed to parse fstat response data: {}", e);
                     return None;
                 }
-                match crate::ipc::stat::from_reader(&mut reader) {
-                    Ok(response) => response,
-                    Err(e) => {
-                        error!("failed to parse fstat response data: {}", e);
-                        return None;
-                    }
-                }
-            }
+            },
             Err(e) => {
                 error!("failed to read fstat response: {}", e);
                 return None;
             }
         };
 
-        unsafe {
-            (*stat).st_dev = res.st_dev;
-            (*stat).st_ino = res.st_ino;
-            (*stat).st_nlink = res.st_nlink as u64;
-            (*stat).st_mode = res.st_mode;
-            (*stat).st_uid = res.st_uid;
-            (*stat).st_gid = res.st_gid;
-            (*stat).st_rdev = res.st_rdev;
-            (*stat).st_size = res.st_size;
-            (*stat).st_blksize = res.st_blksize as i64;
-            (*stat).st_blocks = res.st_blocks as i64;
-            (*stat).st_atime = res.st_atime;
-            (*stat).st_atime_nsec = res.st_atime_nsec as i64;
-            (*stat).st_mtime = res.st_mtime;
-            (*stat).st_mtime_nsec = res.st_mtime_nsec as i64;
-            (*stat).st_ctime = res.st_ctime;
-            (*stat).st_ctime_nsec = res.st_ctime_nsec as i64;
+        if retval == 0 {
+            unsafe {
+                (*stat).st_dev = res.st_dev;
+                (*stat).st_ino = res.st_ino;
+                (*stat).st_nlink = res.st_nlink as u64;
+                (*stat).st_mode = res.st_mode;
+                (*stat).st_uid = res.st_uid;
+                (*stat).st_gid = res.st_gid;
+                (*stat).st_rdev = res.st_rdev;
+                (*stat).st_size = res.st_size;
+                (*stat).st_blksize = res.st_blksize as i64;
+                (*stat).st_blocks = res.st_blocks as i64;
+                (*stat).st_atime = res.st_atime;
+                (*stat).st_atime_nsec = res.st_atime_nsec as i64;
+                (*stat).st_mtime = res.st_mtime;
+                (*stat).st_mtime_nsec = res.st_mtime_nsec as i64;
+                (*stat).st_ctime = res.st_ctime;
+                (*stat).st_ctime_nsec = res.st_ctime_nsec as i64;
+            }
         }
-        Some(0)
+        Some(retval)
     }
 
     pub fn lgetxattr(
@@ -373,28 +326,25 @@ impl LKLFS {
         }
 
         let mut buf = [0; 1024];
-        let res = match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let retval = match self.conn.as_mut().unwrap().recv(&mut buf) {
             Ok(read_size) => {
-                let mut reader = std::io::Cursor::new(&buf[0..read_size]);
-                let res = match Response::from_reader(&mut reader) {
+                match ipc::get_response_unit!(&buf[0..read_size], ResponseKind::Open) {
                     Ok(response) => response,
                     Err(e) => {
-                        error!("failed to parse open response: {}", e);
+                        error!("failed to parse fstat response data: {}", e);
                         return None;
                     }
-                };
-                info!("open response: {:?}", res);
-                if res.status != StatusCode::OK {
-                    error!("ndfuse-proxy returned error: {:?}", res.status);
-                    return None;
                 }
-                res.retval
             }
             Err(e) => {
                 error!("failed to read open response: {}", e);
                 return None;
             }
         };
+
+        if retval < 0 {
+            return Some(retval);
+        }
 
         let fd = unsafe {
             if let Some(original_syscall) = crate::NEXT_SYS_CALL {
@@ -415,9 +365,9 @@ impl LKLFS {
         self.fds.lock().unwrap().insert(
             fd as i32,
             FileHandle {
-                fh: res as u64,
+                fh: retval as u64,
                 _path: abs_path,
-                offset: 0,
+                _offset: 0,
             },
         );
 
@@ -445,27 +395,24 @@ impl LKLFS {
         }
 
         let mut buf = [0u8; 1024];
-        match self.conn.as_mut().unwrap().recv(&mut buf) {
+        let retval = match self.conn.as_mut().unwrap().recv(&mut buf) {
             Ok(read_size) => {
-                let mut reader = std::io::Cursor::new(&buf[0..read_size]);
-                let res = match Response::from_reader(&mut reader) {
+                match ipc::get_response_unit!(&buf[0..read_size], ResponseKind::Close) {
                     Ok(response) => response,
                     Err(e) => {
-                        error!("failed to parse close response: {}", e);
+                        error!("failed to parse close response data: {}", e);
                         return None;
                     }
-                };
-                info!("close response: {:?}", res);
-                if res.status != StatusCode::OK {
-                    error!("ndfuse-proxy returned error: {:?}", res.status);
-                    return Some(1);
                 }
             }
             Err(e) => {
                 error!("failed to read close response: {}", e);
                 return None;
             }
-        }
+        };
+
+        // TODO: handle this
+        _ = retval;
 
         unsafe {
             if let Some(original_syscall) = crate::NEXT_SYS_CALL {
@@ -489,7 +436,7 @@ impl LKLFS {
     pub fn read(
         &mut self,
         fd: libc::c_int,
-        buf: *mut std::ffi::c_void,
+        read_buf: *mut std::ffi::c_void,
         size: libc::size_t,
     ) -> Option<i64> {
         let mut fds = self.fds.lock().unwrap();
@@ -502,7 +449,6 @@ impl LKLFS {
         let req_bytes = Request {
             kind: RequestKind::Read(ReadRequest {
                 fh: fh.fh,
-                offset: fh.offset,
                 size: size as u32,
             }),
         }
@@ -520,42 +466,35 @@ impl LKLFS {
             }
         }
 
-        let mut read_buf = vec![0; size + 200];
-        let (res, read_size) = match self.conn.as_mut().unwrap().recv(&mut read_buf) {
-            Ok(read_size) => {
-                let mut reader = std::io::Cursor::new(&read_buf[0..read_size]);
-                let res = match Response::from_reader(&mut reader) {
-                    Ok(response) => response,
-                    Err(e) => {
-                        error!("failed to parse read response: {}", e);
-                        return None;
-                    }
-                };
-                info!("read response: {:?}", res);
-                if res.status != StatusCode::OK {
-                    error!("ndfuse-proxy returned error: {:?}", res.status);
+        let mut buf = vec![0; size + 200];
+        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+            Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Read) {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("failed to parse read response data: {}", e);
                     return None;
                 }
-                info!("read response data: {:?}", res);
-                (res.retval, read_size)
-            }
+            },
             Err(e) => {
                 error!("failed to read read response: {}", e);
                 return None;
             }
         };
-        println!("read_size={} res.len={}", read_size, res);
-        if res != 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    read_buf[read_size - (res as usize)..read_size].as_ptr(),
-                    buf as *mut u8,
-                    res as usize,
-                );
-            }
-            fh.offset += res as u64;
+        if retval <= 0 {
+            return Some(retval);
         }
-        Some(res as i64)
+        if retval as usize > res.len() {
+            error!(
+                "invalid retval: {} > res.len(): {}",
+                retval as usize,
+                res.len()
+            );
+            return None;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(res.as_ptr(), read_buf as *mut u8, retval as usize);
+        }
+        Some(retval)
     }
 
     pub fn getdents64(
@@ -591,40 +530,35 @@ impl LKLFS {
             }
         }
 
-        let mut read_buf = vec![0; count + 200];
-        let (res, read_size) = match self.conn.as_mut().unwrap().recv(&mut read_buf) {
-            Ok(read_size) => {
-                let mut reader = std::io::Cursor::new(&read_buf[0..read_size]);
-                let res = match Response::from_reader(&mut reader) {
-                    Ok(response) => response,
-                    Err(e) => {
-                        error!("failed to parse getdents64 response: {}", e);
-                        return None;
-                    }
-                };
-                info!("getdents64 response: {:?}", res);
-                if res.status != StatusCode::OK {
-                    error!("ndfuse-proxy returned error: {:?}", res.status);
+        let mut buf = vec![0; count + 200];
+        let (retval, res) = match self.conn.as_mut().unwrap().recv(&mut buf) {
+            Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Getdents64)
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("failed to parse read response data: {}", e);
                     return None;
                 }
-                (res.retval, read_size)
-            }
+            },
             Err(e) => {
-                error!("failed to read getdents64 response: {}", e);
+                error!("failed to read read response: {}", e);
                 return None;
             }
         };
-        println!("read_size={} res.len={}", read_size, res);
-        if res != 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    read_buf[read_size - (res as usize)..read_size].as_ptr(),
-                    dirent as *mut u8,
-                    res as usize,
-                );
-            }
-            fh.offset += res as u64;
+        if retval <= 0 {
+            return Some(retval);
         }
-        Some(res as i64)
+        if retval as usize > res.len() {
+            error!(
+                "invalid retval: {} > res.len(): {}",
+                retval as usize,
+                res.len()
+            );
+            return None;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(res.as_ptr(), dirent as *mut u8, retval as usize);
+        }
+        Some(retval)
     }
 }

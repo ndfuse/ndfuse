@@ -12,10 +12,60 @@ pub trait BinSerdes: for<'a> Deserialize<'a> + Serialize + Sized {
         rmp_serde::from_slice(bytes)
     }
 
+    #[allow(unused)]
     fn from_reader<T: std::io::Read>(r: T) -> Result<Self, rmp_serde::decode::Error> {
         rmp_serde::from_read(r)
     }
 }
+
+#[allow(unused)]
+macro_rules! get_response {
+    ($target:expr, $pat:path) => {{
+        match Response::from_bytes($target) {
+            Ok(r) => {
+                if r.status != StatusCode::OK {
+                    Err(anyhow::anyhow!(
+                        "ndfuse-proxy returned error: {:?}",
+                        r.status
+                    ))
+                } else {
+                    match r.kind {
+                        $pat(value) => Ok((r.retval, value)),
+                        _ => Err(anyhow::anyhow!("unexpected kind {:?}", r.kind)),
+                    }
+                }
+            }
+            Err(e) => Err(anyhow::anyhow!("failed to parse response: {}", e)),
+        }
+    }};
+}
+
+#[allow(unused)]
+macro_rules! get_response_unit {
+    ($target:expr, $pat:path) => {{
+        match Response::from_bytes($target) {
+            Ok(r) => {
+                if r.status != StatusCode::OK {
+                    Err(anyhow::anyhow!(
+                        "ndfuse-proxy returned error: {:?}",
+                        r.status
+                    ))
+                } else {
+                    match r.kind {
+                        $pat => Ok(r.retval),
+                        _ => Err(anyhow::anyhow!("unexpected kind {:?}", r.kind)),
+                    }
+                }
+            }
+            Err(e) => Err(anyhow::anyhow!("failed to parse response: {}", e)),
+        }
+    }};
+}
+
+#[allow(unused)]
+pub(crate) use get_response;
+#[allow(unused)]
+pub(crate) use get_response_unit;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
@@ -34,16 +84,24 @@ pub enum RequestKind {
     Close(CloseRequest),
 }
 
-#[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr)]
-#[repr(u8)]
-pub enum ShimOpcode {
-    Init = 1,
-    Statx = 2,
-    Open = 3,
-    Close = 4,
-    Read = 5,
-    Fstat = 6,
-    Getdents64 = 7,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Response {
+    pub status: StatusCode,
+    pub retval: i64,
+    pub kind: ResponseKind,
+}
+impl BinSerdes for Response {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ResponseKind {
+    Error(ErrorResponse),
+    Init(InitResponse),
+    Statx(libc::statx),
+    Fstat(Stat),
+    Getdents64(Vec<u8>), // raw dirent data
+    Open,
+    Read(Vec<u8>), // data read
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
@@ -54,28 +112,14 @@ pub enum StatusCode {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Response {
-    pub opcode: ShimOpcode,
-    pub status: StatusCode,
-    pub retval: i64,
-}
-impl BinSerdes for Response {}
-
-#[derive(Serialize, Deserialize, Debug)]
 pub struct ErrorResponse {
     pub msg: String,
 }
-impl BinSerdes for ErrorResponse {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct EmptyResponse {}
-impl BinSerdes for EmptyResponse {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitResponse {
     pub mountpoint: String,
 }
-impl BinSerdes for InitResponse {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StatxRequest {
@@ -84,14 +128,11 @@ pub struct StatxRequest {
     pub mask: c_uint,
     pub abs_path: String,
 }
-impl BinSerdes for StatxRequest {}
-impl BinSerdes for libc::statx {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FstatRequest {
     pub fd: i32,
 }
-impl BinSerdes for FstatRequest {}
 
 // refer to lkl/linux/tools/lkl/include/lkl/asm-generic/stat.h
 #[repr(C)]
@@ -128,25 +169,20 @@ pub struct OpenRequest {
     pub mode: u32,
     pub abs_path: String,
 }
-impl BinSerdes for OpenRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CloseRequest {
     pub fh: u64,
 }
-impl BinSerdes for CloseRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ReadRequest {
     pub fh: u64,
-    pub offset: u64,
     pub size: u32,
 }
-impl BinSerdes for ReadRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Getdents64Request {
     pub fd: i32,
     pub count: u32,
 }
-impl BinSerdes for Getdents64Request {}

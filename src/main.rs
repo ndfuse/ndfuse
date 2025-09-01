@@ -11,8 +11,8 @@ use std::time::Duration;
 use uds::{UnixSeqpacketConn, UnixSeqpacketListener};
 
 use crate::ipc::BinSerdes;
-use crate::ipc::ShimOpcode;
 use crate::ipc::{Request, RequestKind};
+use crate::ipc::{Response, ResponseKind, StatusCode};
 
 mod ipc;
 
@@ -42,7 +42,7 @@ unsafe extern "C" {
         mask: u32,
         statxbuf: *mut libc::statx,
     ) -> i64;
-    fn lkl_wrapper_sys_fstat(fd: i32, statbuf: *mut ipc::stat) -> i64;
+    fn lkl_wrapper_sys_fstat(fd: i32, statbuf: *mut ipc::Stat) -> i64;
     fn lkl_wrapper_sys_getdents64(fd: i32, dirent: *mut libc::dirent64, count: u32) -> i64;
     fn lkl_wrapper_sys_mmap(
         addr: *mut u8,
@@ -193,18 +193,6 @@ fn handle_client(stream: UnixSeqpacketConn) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn serialize_response<T: BinSerdes>(
-    resp: &ipc::Response,
-    body: Option<&T>,
-) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    buf.extend(resp.to_bytes()?);
-    if let Some(b) = body {
-        buf.extend(b.to_bytes()?);
-    }
-    Ok(buf)
-}
-
 fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut reader = std::io::Cursor::new(buffer);
     let req = Request::from_reader(&mut reader)?;
@@ -212,16 +200,14 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     match req.kind {
         RequestKind::Init => {
-            return serialize_response(
-                &ipc::Response {
-                    opcode: ShimOpcode::Init,
-                    status: ipc::StatusCode::OK,
-                    retval: 0,
-                },
-                Some(&ipc::InitResponse {
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: 0,
+                kind: ResponseKind::Init(ipc::InitResponse {
                     mountpoint: FUSE_MOUNTPOINT.to_string(),
                 }),
-            );
+            }
+            .to_bytes()?);
         }
         RequestKind::Statx(req) => {
             let path = CString::new(req.abs_path).unwrap();
@@ -236,33 +222,27 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 )
             };
             if ret < 0 {
-                error!("lkl_sys_statx failed: {}", lkl_strerror_safe((-ret) as i32));
-                return Err(anyhow::anyhow!("lkl_sys_statx failed"));
+                debug!("lkl_sys_statx failed: {}", lkl_strerror_safe((-ret) as i32));
             }
-            return serialize_response(
-                &ipc::Response {
-                    opcode: ShimOpcode::Statx,
-                    status: ipc::StatusCode::OK,
-                    retval: ret,
-                },
-                Some(&statx),
-            );
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: ret,
+                kind: ResponseKind::Statx(statx),
+            }
+            .to_bytes()?);
         }
         RequestKind::Fstat(req) => {
-            let mut stat = unsafe { std::mem::zeroed::<ipc::stat>() };
-            let ret = unsafe { lkl_wrapper_sys_fstat(req.fd, &mut stat as *mut ipc::stat) };
+            let mut stat = unsafe { std::mem::zeroed::<ipc::Stat>() };
+            let ret = unsafe { lkl_wrapper_sys_fstat(req.fd, &mut stat as *mut ipc::Stat) };
             if ret < 0 {
-                error!("lkl_sys_fstat failed: {}", lkl_strerror_safe((-ret) as i32));
-                return Err(anyhow::anyhow!("lkl_sys_fstat failed"));
+                debug!("lkl_sys_fstat failed: {}", lkl_strerror_safe((-ret) as i32));
             }
-            return serialize_response(
-                &ipc::Response {
-                    opcode: ShimOpcode::Fstat,
-                    status: ipc::StatusCode::OK,
-                    retval: ret,
-                },
-                Some(&stat),
-            );
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: ret,
+                kind: ResponseKind::Fstat(stat),
+            }
+            .to_bytes()?);
         }
         RequestKind::Getdents64(req) => {
             let mut dirents = vec![0u8; req.count as usize];
@@ -274,22 +254,17 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 )
             };
             if ret < 0 {
-                error!(
+                debug!(
                     "lkl_sys_getdents64 failed: {}",
                     lkl_strerror_safe((-ret) as i32)
                 );
-                return Err(anyhow::anyhow!("lkl_sys_getdents64 failed"));
             }
-            let mut res = serialize_response::<ipc::EmptyResponse>(
-                &ipc::Response {
-                    opcode: ShimOpcode::Getdents64,
-                    status: ipc::StatusCode::OK,
-                    retval: ret,
-                },
-                None,
-            )?;
-            res.extend(&dirents[0..ret as usize]);
-            return Ok(res);
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: ret,
+                kind: ResponseKind::Getdents64(dirents[..ret as usize].to_vec()),
+            }
+            .to_bytes()?);
         }
         RequestKind::Open(req) => {
             let path = CString::new(req.abs_path).unwrap();
@@ -297,52 +272,40 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
                 unsafe { lkl_wrapper_sys_open(path.as_ptr(), req.flags as i32, req.mode as i32) };
 
             if ret < 0 {
-                error!("lkl_sys_open failed: {}", lkl_strerror_safe((-ret) as i32));
-                return Err(anyhow::anyhow!("lkl_sys_open failed"));
+                debug!("lkl_sys_open failed: {}", lkl_strerror_safe((-ret) as i32));
             }
-            return serialize_response::<ipc::EmptyResponse>(
-                &ipc::Response {
-                    opcode: ShimOpcode::Open,
-                    status: ipc::StatusCode::OK,
-                    retval: ret,
-                },
-                None,
-            );
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: ret,
+                kind: ResponseKind::Open,
+            }
+            .to_bytes()?);
         }
         RequestKind::Read(req) => {
             let mut buf = vec![0u8; req.size as usize];
             let ret =
                 unsafe { lkl_wrapper_sys_read(req.fh as i32, buf.as_mut_ptr(), req.size as usize) };
             if ret < 0 {
-                error!("lkl_sys_read failed: {}", lkl_strerror_safe((-ret) as i32));
-                return Err(anyhow::anyhow!("lkl_sys_read failed"));
+                debug!("lkl_sys_read failed: {}", lkl_strerror_safe((-ret) as i32));
             }
-
-            let mut res = serialize_response::<ipc::EmptyResponse>(
-                &ipc::Response {
-                    opcode: ShimOpcode::Read,
-                    status: ipc::StatusCode::OK,
-                    retval: ret,
-                },
-                None,
-            )?;
-            res.extend(&buf[..ret as usize]);
-            return Ok(res);
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: ret,
+                kind: ResponseKind::Read(buf[..ret as usize].to_vec()),
+            }
+            .to_bytes()?);
         }
         RequestKind::Close(req) => {
             let ret = unsafe { lkl_wrapper_sys_close(req.fh as i32) };
             if ret < 0 {
-                error!("lkl_sys_close failed: {}", lkl_strerror_safe((-ret) as i32));
-                return Err(anyhow::anyhow!("lkl_sys_close failed"));
+                debug!("lkl_sys_close failed: {}", lkl_strerror_safe((-ret) as i32));
             }
-            return serialize_response::<ipc::EmptyResponse>(
-                &ipc::Response {
-                    opcode: ShimOpcode::Close,
-                    status: ipc::StatusCode::OK,
-                    retval: ret,
-                },
-                None,
-            );
+            return Ok(Response {
+                status: StatusCode::OK,
+                retval: ret,
+                kind: ResponseKind::Close,
+            }
+            .to_bytes()?);
         }
     };
 }
