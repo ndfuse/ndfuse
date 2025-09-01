@@ -116,7 +116,9 @@ pub unsafe extern "C" fn __hook_init(
         }
         Err(e) => {
             eprintln!("Filesystem initialization failed: {}", e);
-            return -1;
+
+            // Not to return '-1' to avoid hang-up
+            return 0;
         }
     };
 }
