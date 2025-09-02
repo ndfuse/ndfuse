@@ -91,8 +91,6 @@ extern "C" fn hook_function(
                 None => return original_syscall(a1, a2, a3, a4, a5, a6, a7),
             }
         } else {
-            // `__hook_init` が呼ばれる前にこの関数が呼ばれた場合、
-            // プログラムは不正な状態なのでパニックさせます。
             panic!("Hook called before initialization!");
         }
     }
@@ -103,8 +101,6 @@ pub unsafe extern "C" fn __hook_init(
     _placeholder: c_long,
     sys_call_hook_ptr: *mut SyscallFn,
 ) -> i32 {
-    println!("output from __hook_init: we can do some init work here");
-
     unsafe {
         NEXT_SYS_CALL = Some(*sys_call_hook_ptr);
         *sys_call_hook_ptr = hook_function;

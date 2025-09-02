@@ -73,6 +73,11 @@ jobs:
           
           echo 'All builds completed successfully!'
         "
+
+    - name: Run test
+      run: |
+        ./test/test.sh
+
     - name: Test with kind
       run: |
         cd kind
