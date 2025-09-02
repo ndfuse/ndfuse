@@ -19,5 +19,7 @@ sleep 1
 
 run_cmd_and_compare_diff "ls -l -R"
 run_cmd_and_compare_diff "cat testdir/FILE1.txt"
+run_cmd_and_compare_diff "cat testdir/10MiB.bin"
+run_cmd_and_compare_diff "sha256sum testdir/10MiB.bin"
 
 kill $PROXY_PID
