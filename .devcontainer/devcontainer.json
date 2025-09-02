@@ -11,5 +11,6 @@
 				"ms-vscode.cpptools-extension-pack"
 			]
 		}
-	}
+	},
+	"runArgs": ["--privileged"]
 }
