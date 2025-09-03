@@ -121,23 +121,27 @@ impl LKLFS {
     ) -> Option<i64> {
         let path =
             std::path::Path::new(unsafe { std::ffi::CStr::from_ptr(pathname).to_str().unwrap() });
-        let abs_path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            if dirfd == libc::AT_FDCWD {
-                std::env::current_dir().unwrap().join(path)
-            } else {
-                error!("dirfd={} is not AT_FDCWD", dirfd);
+
+        let (dirfd, abs_path) = if dirfd == libc::AT_FDCWD {
+            let abs_path = std::env::current_dir().unwrap().join(path);
+            // check if the path is within the mountpoint
+            if !self.contains_path(&abs_path) {
                 return None;
             }
+            (libc::AT_FDCWD, abs_path)
+        } else {
+            // get the file handle from dirfd
+            let fds = self.fds.lock().unwrap();
+            let fh = if let Some(fh) = fds.get(&dirfd) {
+                fh
+            } else {
+                error!("dirfd={} not found in fds", dirfd);
+                return None;
+            };
+            (fh.fh as c_int, path.to_path_buf())
         };
 
         info!("statx: dirfd={} abs_path = {}", dirfd, abs_path.display());
-
-        // check if the path is within the mountpoint
-        if !self.contains_path(&abs_path) {
-            return None;
-        }
 
         let req_bytes = Request {
             kind: RequestKind::Statx(StatxRequest {
