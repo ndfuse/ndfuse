@@ -288,12 +288,15 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
             if ret < 0 {
                 debug!("lkl_sys_read failed: {}", lkl_strerror_safe((-ret) as i32));
             }
-            return Ok(Response {
+            let mut res = Response {
                 status: StatusCode::OK,
                 retval: ret,
-                kind: ResponseKind::Read(buf[..ret as usize].to_vec()),
+                kind: ResponseKind::Read,
             }
-            .to_bytes()?);
+            .to_bytes()?;
+            res.extend_from_slice(&buf[..ret as usize]);
+            debug!("lkl_sys_read returned {} bytes", res.len());
+            return Ok(res);
         }
         RequestKind::Close(req) => {
             let ret = unsafe { lkl_wrapper_sys_close(req.fh as i32) };

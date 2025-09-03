@@ -100,7 +100,7 @@ pub enum ResponseKind {
     Fstat(Stat),
     Getdents64(Vec<u8>), // raw dirent data
     Open,
-    Read(Vec<u8>), // data read
+    Read,
     Close,
 }
 
