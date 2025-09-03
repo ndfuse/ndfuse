@@ -437,55 +437,80 @@ impl LKLFS {
             return None;
         };
         info!("read: fd = {}, fh = {}", fd, fh.fh);
-        let req_bytes = Request {
-            kind: RequestKind::Read(ReadRequest {
-                fh: fh.fh,
-                size: size as u32,
-            }),
-        }
-        .to_bytes()
-        .unwrap();
+        let mut offset = 0;
+        while offset < size {
+            // read in chunks of 128KiB
+            let max_read_size = (size - offset).min(128 * 1024);
 
-        info!("req_bytes.len() = {}", req_bytes.len());
-
-        match self.conn.send(&req_bytes) {
-            Ok(n) => {
-                debug!("write size {}", n);
+            let req_bytes = Request {
+                kind: RequestKind::Read(ReadRequest {
+                    fh: fh.fh,
+                    size: max_read_size as u32,
+                }),
             }
-            Err(e) => {
-                error!("failed to write to socket: {}", e);
-            }
-        }
+            .to_bytes()
+            .unwrap();
 
-        let mut buf = vec![0; size + 200];
-        let (retval, res) = match self.conn.recv(&mut buf) {
-            Ok(read_size) => match ipc::get_response!(&buf[0..read_size], ResponseKind::Read) {
-                Ok(response) => response,
+            debug!("try to read offset/size = {}/{}", offset, size);
+
+            match self.conn.send(&req_bytes) {
+                Ok(n) => {
+                    debug!("write size {}", n);
+                }
                 Err(e) => {
-                    error!("failed to parse read response data: {}", e);
+                    error!("failed to write to socket: {}", e);
+                }
+            }
+
+            let mut buf = vec![0; max_read_size + 200];
+            let (read_size, retval) = match self.conn.recv(&mut buf) {
+                Ok(read_size) => {
+                    match ipc::get_response_unit!(&buf[0..read_size], ResponseKind::Read) {
+                        Ok(retval) => (read_size, retval),
+                        Err(e) => {
+                            error!(
+                                "failed to parse read response data(size={}): {}",
+                                read_size, e
+                            );
+                            return None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("failed to read read response: {}", e);
                     return None;
                 }
-            },
-            Err(e) => {
-                error!("failed to read read response: {}", e);
+            };
+            debug!(
+                "read: offset={}, retval={} max_read_size={}",
+                offset, retval, max_read_size
+            );
+            if retval < 0 {
+                return Some(retval);
+            } else if retval == 0 {
+                break;
+            }
+            if retval as usize > max_read_size {
+                error!(
+                    "invalid retval: {} > max_read_size: {}",
+                    retval as usize, max_read_size,
+                );
                 return None;
             }
-        };
-        if retval <= 0 {
-            return Some(retval);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    buf[read_size - retval as usize..read_size].as_ptr(),
+                    read_buf.wrapping_byte_offset(offset as isize) as *mut u8,
+                    retval as usize,
+                );
+            }
+            offset += retval as usize;
+            if (retval as usize) < max_read_size {
+                // EOF
+                break;
+            }
         }
-        if retval as usize > res.len() {
-            error!(
-                "invalid retval: {} > res.len(): {}",
-                retval as usize,
-                res.len()
-            );
-            return None;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(res.as_ptr(), read_buf as *mut u8, retval as usize);
-        }
-        Some(retval)
+        Some(offset as i64)
     }
 
     pub fn getdents64(
