@@ -16,7 +16,7 @@ function run_cmd_and_compare_diff() {
     diff <(cd /mnt && /bin/bash -c "$CMD_PREFIX $CMD") <(/bin/bash -c "$CMD")
 }
 
-../target/debug/ndfuse-proxy ../go-fuse-loopback/go-fuse-loopback /dev/fd/ndfuse ./ &
+RUST_LOG=info ../target/debug/ndfuse-proxy ../go-fuse-loopback/go-fuse-loopback /dev/fd/ndfuse ./ &
 PROXY_PID=$!
 
 trap 'kill $PROXY_PID' EXIT
@@ -26,8 +26,13 @@ run_cmd_and_compare_diff "ls -l -R ./"
 run_cmd_and_compare_diff "cat testdir/FILE1.txt"
 run_cmd_and_compare_diff "sha256sum testdir/FILE1.txt"
 
-BINS=("16KiB" "64KiB" "128KiB" "256KiB") # TODO: 1MiB 10MiB
-for size in "${BINS[@]}"; do
-    run_cmd_and_compare_diff "cat testdir/$size.bin"
-    run_cmd_and_compare_diff "sha256sum testdir/$size.bin"
+BINS=("16KiB" "64KiB" "128KiB" "256KiB" "1MiB" "16MiB" "64MiB" "128MiB")
+# Do heavy tests
+for i in $(seq 1 10); do
+    for size in "${BINS[@]}"; do
+        run_cmd_and_compare_diff "cat testdir/$size.bin"
+        run_cmd_and_compare_diff "sha256sum testdir/$size.bin"
+    done
 done
+
+echo "All tests passed"
