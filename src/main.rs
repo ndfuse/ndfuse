@@ -1,10 +1,11 @@
 use command_fds::{CommandFdExt, FdMapping};
+use libc::c_int;
 use log::{debug, error, info};
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socketpair};
 use std::env;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -313,6 +314,95 @@ fn handle_request(buffer: &[u8]) -> anyhow::Result<Vec<u8>> {
     };
 }
 
+fn create_socketpair(buf_size: i32) -> anyhow::Result<(OwnedFd, OwnedFd, i32)> {
+    let (fd1, fd2) = socketpair(
+        AddressFamily::Unix,
+        SockType::Datagram,
+        None::<SockProtocol>, // No specific protocol needed for AF_UNIX, SOCK_DGRAM
+        SockFlag::empty(),
+    )?;
+    let socket_buf_size = 128 * 1024 * 8; // 1MB
+    let mut got_socket_buf_size: i32 = 0;
+    let mut got_socket_buf_size_len = std::mem::size_of::<i32>() as u32;
+    unsafe {
+        libc::setsockopt(
+            fd1.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &socket_buf_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        libc::getsockopt(
+            fd1.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &mut got_socket_buf_size as *mut _ as *mut libc::c_void,
+            &mut got_socket_buf_size_len as *mut u32,
+        );
+    }
+    let mut res_buf_size = buf_size;
+    res_buf_size = res_buf_size.min(configure_socket_buf_size(
+        fd1.as_raw_fd(),
+        libc::SO_SNDBUF,
+        buf_size,
+    )?);
+    res_buf_size = res_buf_size.min(configure_socket_buf_size(
+        fd1.as_raw_fd(),
+        libc::SO_RCVBUF,
+        buf_size,
+    )?);
+    res_buf_size = res_buf_size.min(configure_socket_buf_size(
+        fd2.as_raw_fd(),
+        libc::SO_SNDBUF,
+        buf_size,
+    )?);
+    res_buf_size = res_buf_size.min(configure_socket_buf_size(
+        fd2.as_raw_fd(),
+        libc::SO_RCVBUF,
+        buf_size,
+    )?);
+    if res_buf_size <= 0 {
+        return Err(anyhow::anyhow!("Failed to configure socket buffer size"));
+    }
+    Ok((fd1, fd2, res_buf_size))
+}
+
+fn configure_socket_buf_size(fd: c_int, name: c_int, size: i32) -> anyhow::Result<i32> {
+    let mut got_socket_buf_size: i32 = 0;
+    let mut got_socket_buf_size_len = std::mem::size_of::<i32>() as u32;
+    unsafe {
+        if libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            name,
+            &size as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as u32,
+        ) == -1
+        {
+            return Err(anyhow::anyhow!(
+                "setsockopt({}) failed: {}",
+                name,
+                std::io::Error::last_os_error()
+            ));
+        }
+        if libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            name,
+            &mut got_socket_buf_size as *mut _ as *mut libc::c_void,
+            &mut got_socket_buf_size_len as *mut u32,
+        ) == -1
+        {
+            return Err(anyhow::anyhow!(
+                "getsockopt({}) failed: {}",
+                name,
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(got_socket_buf_size)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path =
         env::var("NDFUSE_SOCKET_PATH").unwrap_or_else(|_| "/tmp/ndfuse.sock".to_string());
@@ -380,10 +470,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!("Successfully created {} directory", FUSE_MOUNTPOINT);
 
+    // Create socketpair
+    let buffer_factor = 8;
+    let (sock_parent, sock_child, socket_buf_size) =
+        create_socketpair(128 * 1024 * buffer_factor).expect("Failed to create socketpair");
+    info!("Successfully created socketpair");
+
+    info!("Socket buffer size: {} bytes", socket_buf_size);
+    // max_read is configured to avoid message loss considering concurrent flighting messages.
+    let max_read = (socket_buf_size / buffer_factor).min(128 * 1024); // max_read capped at 128KiB
+    info!("Setting max_read to {} bytes", max_read);
+
     // Mount filesystem
     let source = CString::new("ndfuse")?;
     let fstype = CString::new("fuse.ndfuse")?;
-    let mount_data = CString::new("max_read=131072,fd=0,rootmode=40000,user_id=0,group_id=0")?;
+    let mount_data = CString::new(format!(
+        "max_read={},fd=0,rootmode=40000,user_id=0,group_id=0",
+        max_read
+    ))?;
     let ret = unsafe {
         lkl_wrapper_sys_mount(
             source.as_ptr(),
@@ -401,16 +505,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Failed to mount filesystem".into());
     }
     info!("Successfully mounted ndfuse at {}", FUSE_MOUNTPOINT);
-
-    // Create socketpair
-    let (sock_parent, sock_child) = socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None::<SockProtocol>, // No specific protocol needed for AF_UNIX, SOCK_STREAM
-        SockFlag::empty(),
-    )
-    .expect("Failed to create socketpair");
-    info!("Successfully created socketpair");
 
     let fuse_process_handle = std::thread::spawn(move || {
         // Prepare arguments for execve
